@@ -4,6 +4,7 @@ from typing import Union, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
+# from torch.distributions import dist
 from tqdm import tqdm
 from normalizing_flows.bijections.base import Bijection
 from normalizing_flows.bijections.continuous.ddnf import DeepDiffeomorphicBijection
@@ -362,3 +363,252 @@ class DDNF(Flow):
 
                 if show_progress:
                     iterator.set_postfix_str(f'Loss: {loss:.4f}')
+
+
+
+class PrincipalManifoldFlow(Flow):
+    """
+    Principal manifold flow.
+
+    This class represents a normalizing flow that learns the principal manifold of the input data.
+    """
+
+    def __init__(self, bijection: Bijection, manifold_dim: int, **kwargs):
+        """
+        :param bijection: transformation component of the normalizing flow.
+        :param manifold_dim: dimensionality of the principal manifold.
+        """
+        super().__init__(bijection)
+        # self.manifold_dim = manifold_dim
+
+
+    def PF_objective_brute_force(self, x: torch.Tensor, P, alpha: float = 5.0, context: torch.Tensor = None): 
+        """ Brute force implementation of the PF objective for the Flow class.
+
+        Inputs:
+            x       - Batched input tensor
+            P       - List of torch tensors that form a partition over range(x.size)
+            alpha   - Regularization hyperparameter
+            context - Context tensor
+
+        Outputs:
+            objective - PF's objective
+        """
+        # Evaluate log p(x) with the set prior
+        if context is not None:
+            assert context.shape[0] == x.shape[0]
+            context = context.to(self.loc)
+        z, log_det = self.bijection.forward(x.to(self.loc), context=context)
+        log_pz = self.base_log_prob(z)
+        log_px = log_pz + log_det
+        
+        # print("z shape: ", z.shape)
+        # print("log_det shape: ", log_det.shape)
+        # print("log_pz shape: ", log_pz.shape)
+        # print("log_px shape: ", log_px.shape)
+        # print("x shape: ", x.shape)
+
+        # Create the Jacobian matrix for every item in the batch
+        G = torch.autograd.functional.jacobian(lambda x: self.bijection.forward(x.to(self.loc), context=context), x)[0]
+        # print("G shape: ", G.shape)
+
+        # Compute Ihat_P for each element in the batch
+        Ihat_P = -log_det
+        for k in P:
+            # print("k: ", k)
+            Gk = G[:, k]
+            Gk_T = torch.transpose(Gk, -2, -1)
+            GkGk_T = torch.matmul(Gk, Gk_T)
+            # print("GkGk_T shape: ", GkGk_T.shape)
+            # print("Gk shape: ", Gk.shape)
+            # print("Gk_T shape: ", Gk_T.shape)
+            # print("slodet shape: ", torch.slogdet(GkGk_T)[1].shape)
+            Ihat_P += 0.5 * torch.slogdet(GkGk_T)[1]
+
+        objective = -log_px + alpha * Ihat_P
+        return objective.mean()
+
+    
+
+
+    def PF_objective_unbiased(self, x: torch.Tensor, alpha: float = 5.0, random_seed: int = None, context: torch.Tensor = None):
+        """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
+
+        Inputs:
+            x       - Unbatched 1d input
+            rng_key - Torch random generator
+            alpha   -  Regularization hyperparameter
+
+        Outputs:
+            objective - PFs objective
+        """
+        # Evaluate log p(x) with a Gaussian prior and construct the vjp function
+        z, log_det = self.bijection.forward(x.to(self.loc), context=context)
+        log_pz = self.base.log_prob(z)
+        log_px = log_pz + log_det
+
+        # Sample an index in the partition
+        z_dim = z.shape[-1]
+        k = torch.randint(0, z_dim, (1,))
+        k_onehot = torch.zeros(z_dim)
+        k_onehot[k] = 1.0
+        k_onehot = k_onehot.to(z.device)
+
+        # Compute an unbiased estimate of Ihat_P
+        z.requires_grad_(True)
+        Gk, = torch.autograd.grad(outputs=z, inputs=x, grad_outputs=k_onehot, retain_graph=True, create_graph=True)
+        GkGkT = torch.sum(Gk**2)
+        Ihat_P = -log_det + z_dim * 0.5 * torch.log(GkGkT)
+
+        objective = -log_px + alpha * Ihat_P
+        return objective.mean()
+
+
+    def fit(self,
+            x_train: torch.Tensor,
+            n_epochs: int = 500,
+            lr: float = 0.05,
+            batch_size: int = 1024,
+            shuffle: bool = True,
+            show_progress: bool = False,
+            w_train: torch.Tensor = None,
+            context_train: torch.Tensor = None,
+            x_val: torch.Tensor = None,
+            w_val: torch.Tensor = None,
+            context_val: torch.Tensor = None,
+            keep_best_weights: bool = True,
+            early_stopping: bool = False,
+            early_stopping_threshold: int = 50):
+        """
+        Fit the normalizing flow.
+
+        Fitting the flow means finding the parameters of the bijection that maximize the probability of training data.
+        Bijection parameters are iteratively updated for a specified number of epochs.
+        If context data is provided, the normalizing flow learns the distribution of data conditional on context data.
+
+        :param x_train: training data with shape (n_training_data, *event_shape).
+        :param n_epochs: perform fitting for this many steps.
+        :param lr: learning rate. In general, lower learning rates are recommended for high-parametric bijections.
+        :param batch_size: in each epoch, split training data into batches of this size and perform a parameter update for each batch.
+        :param shuffle: shuffle training data. This helps avoid incorrect fitting if nearby training samples are similar.
+        :param show_progress: show a progress bar with the current batch loss.
+        :param w_train: training data weights with shape (n_training_data,).
+        :param context_train: training data context tensor with shape (n_training_data, *context_shape).
+        :param x_val: validation data with shape (n_validation_data, *event_shape).
+        :param w_val: validation data weights with shape (n_validation_data,).
+        :param context_val: validation data context tensor with shape (n validation_data, *context_shape).
+        :param keep_best_weights: if True and validation data is provided, keep the bijection weights with the highest probability of validation data.
+        :param early_stopping: if True and validation data is provided, stop the training procedure early once validation loss stops improving for a specified number of consecutive epochs.
+        :param early_stopping_threshold: if early_stopping is True, fitting stops after no improvement in validation loss for this many epochs.
+        """
+        self.bijection.train()
+
+        # Compute the number of event dimensions
+        n_event_dims = int(torch.prod(torch.as_tensor(self.bijection.event_shape)))
+
+        # Set the default batch size
+        if batch_size is None:
+            batch_size = len(x_train)
+
+        # Process training data 
+        train_loader = create_data_loader(  
+            x_train,
+            w_train,
+            context_train,
+            "training",
+            batch_size=batch_size,
+            shuffle=shuffle,
+            event_shape=self.bijection.event_shape
+        )
+
+        # Process validation data
+        if x_val is not None:
+            val_loader = create_data_loader(
+                x_val,
+                w_val,
+                context_val,
+                "validation",
+                batch_size=batch_size,
+                shuffle=shuffle,
+                event_shape=self.bijection.event_shape
+            )
+
+            best_val_loss = torch.inf
+            best_epoch = 0
+            best_weights = deepcopy(self.state_dict())
+
+        def compute_batch_loss(batch_, reduction: callable = torch.mean):
+            batch_x, batch_weights = batch_[:2]
+            batch_context = batch_[2] if len(batch_) == 3 else None
+
+            batch_log_prob = self.log_prob(batch_x.to(self.loc), context=batch_context)
+            batch_weights = batch_weights.to(self.loc)
+            assert batch_log_prob.shape == batch_weights.shape, f"{batch_log_prob.shape = }, {batch_weights.shape = }"
+            batch_loss = -reduction(batch_log_prob * batch_weights) / n_event_dims
+
+            return batch_loss
+
+        iterator = tqdm(range(n_epochs), desc='Fitting Principal Manifold Flow', disable=not show_progress)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
+        val_loss = None
+
+        for epoch in iterator:
+            for train_batch in train_loader:
+                optimizer.zero_grad()
+                # train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
+                # batch context
+                batch_context = train_batch[2] if len(train_batch) == 3 else None
+
+                # generate partition P
+                z_dim = train_batch[0][0].shape[-1]
+                P = torch.randperm(z_dim)
+
+                # print("P permutation: ", P)
+                # Compute the PF objective
+                train_loss = self.PF_objective_brute_force(train_batch[0], P = P, context = batch_context)
+                
+                train_loss.backward()
+                optimizer.step()
+
+                if show_progress:
+                    if val_loss is None:
+                        iterator.set_postfix_str(f'Training loss (batch): {train_loss:.4f}')
+                    else:
+                        iterator.set_postfix_str(
+                            f'Training loss (batch): {train_loss:.4f}, '
+                            f'Validation loss: {val_loss:.4f}'
+                        )
+
+            # Compute validation loss at the end of each epoch
+            # Validation loss will be displayed at the start of the next epoch
+            if x_val is not None:
+                with torch.no_grad():
+                    # Compute validation loss
+                    val_loss = 0.0
+                    for val_batch in val_loader:
+                        n_batch_data = len(val_batch[0])
+                        val_loss += compute_batch_loss(val_batch, reduction=torch.sum) / n_batch_data
+                    if hasattr(self.bijection, 'regularization'):
+                        val_loss += self.bijection.regularization()
+
+                    # Check if validation loss is the lowest so far
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_epoch = epoch
+
+                    # Store current weights
+                    if keep_best_weights:
+                        if best_epoch == epoch:
+                            best_weights = deepcopy(self.state_dict())
+
+                    # Optionally stop training early
+                    if early_stopping:
+                        if epoch - best_epoch > early_stopping_threshold:
+                            break
+
+        if x_val is not None and keep_best_weights:
+            self.load_state_dict(best_weights)
+
+        self.bijection.eval()
+
+
