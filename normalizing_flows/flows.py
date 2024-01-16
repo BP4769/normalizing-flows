@@ -4,7 +4,6 @@ from typing import Union, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-# from torch.distributions import dist
 from tqdm import tqdm
 from normalizing_flows.bijections.base import Bijection
 from normalizing_flows.bijections.continuous.ddnf import DeepDiffeomorphicBijection
@@ -373,13 +372,12 @@ class PrincipalManifoldFlow(Flow):
     This class represents a normalizing flow that learns the principal manifold of the input data.
     """
 
-    def __init__(self, bijection: Bijection, manifold_dim: int, **kwargs):
+    def __init__(self, bijection: Bijection, **kwargs):
         """
         :param bijection: transformation component of the normalizing flow.
         :param manifold_dim: dimensionality of the principal manifold.
         """
         super().__init__(bijection)
-        # self.manifold_dim = manifold_dim
 
 
     def PF_objective_brute_force(self, x: torch.Tensor, P, alpha: float = 5.0, context: torch.Tensor = None): 
@@ -431,7 +429,7 @@ class PrincipalManifoldFlow(Flow):
     
 
 
-    def PF_objective_unbiased(self, x: torch.Tensor, alpha: float = 5.0, random_seed: int = None, context: torch.Tensor = None):
+    def PF_objective_unbiased(self, x: torch.Tensor, alpha: float = 5.0, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
         """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
 
         Inputs:
@@ -442,26 +440,41 @@ class PrincipalManifoldFlow(Flow):
         Outputs:
             objective - PFs objective
         """
-        # Evaluate log p(x) with a Gaussian prior and construct the vjp function
+
+        # Evaluate log p(x) with the set prior
+        if context is not None:
+            assert context.shape[0] == x.shape[0]
+            context = context.to(self.loc)
         z, log_det = self.bijection.forward(x.to(self.loc), context=context)
-        log_pz = self.base.log_prob(z)
+        log_pz = self.base_log_prob(z)
         log_px = log_pz + log_det
 
+        
         # Sample an index in the partition
+        # print("z shape: ", z.shape)
         z_dim = z.shape[-1]
-        k = torch.randint(0, z_dim, (1,))
+        if random_seed is None:
+            k = torch.randint(0, z_dim, (1,)).item()
+        else:
+            k = torch.randint(0, z_dim, (1,), generator=torch.Generator().manual_seed(random_seed)).item()
         k_onehot = torch.zeros(z_dim)
         k_onehot[k] = 1.0
-        k_onehot = k_onehot.to(z.device)
+        k_mask = k_onehot.repeat(z.shape[0], 1)
+
+        # print("k: ", k)
+        # print("k_onehot: ", k_onehot)
+        # print("k_mask: ", k_mask)
 
         # Compute an unbiased estimate of Ihat_P
         z.requires_grad_(True)
-        Gk, = torch.autograd.grad(outputs=z, inputs=x, grad_outputs=k_onehot, retain_graph=True, create_graph=True)
+        Gk = torch.autograd.functional.vjp(lambda z: self.bijection.forward(z.to(self.loc), context=context)[0], z, v=k_mask)[1]
         GkGkT = torch.sum(Gk**2)
         Ihat_P = -log_det + z_dim * 0.5 * torch.log(GkGkT)
 
+        # print("Gk shape: ", Gk.shape)
+
         objective = -log_px + alpha * Ihat_P
-        return objective.mean()
+        return reduction(objective)
 
 
     def fit(self,
@@ -541,12 +554,21 @@ class PrincipalManifoldFlow(Flow):
             batch_x, batch_weights = batch_[:2]
             batch_context = batch_[2] if len(batch_) == 3 else None
 
-            batch_log_prob = self.log_prob(batch_x.to(self.loc), context=batch_context)
-            batch_weights = batch_weights.to(self.loc)
-            assert batch_log_prob.shape == batch_weights.shape, f"{batch_log_prob.shape = }, {batch_weights.shape = }"
-            batch_loss = -reduction(batch_log_prob * batch_weights) / n_event_dims
+            # print("batch_x shape: ", batch_x.shape)
+            # print("batch_weights shape: ", batch_weights.shape)
+            # print("batch_context: ", batch_context)
 
-            return batch_loss
+            # print("batch_x: ", batch_x)
+            # print("batch_weights: ", batch_weights)
+
+            # generate partition P (for brute force implementation)
+            z_dim = train_batch[0][0].shape[-1]
+            P = torch.randperm(z_dim)
+            # batch_objective = self.PF_objective_brute_force(batch_x, P, context = batch_context)
+
+            batch_objective = self.PF_objective_unbiased(batch_x, context = batch_context, reduction = reduction)
+
+            return batch_objective
 
         iterator = tqdm(range(n_epochs), desc='Fitting Principal Manifold Flow', disable=not show_progress)
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
@@ -555,18 +577,7 @@ class PrincipalManifoldFlow(Flow):
         for epoch in iterator:
             for train_batch in train_loader:
                 optimizer.zero_grad()
-                # train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
-                # batch context
-                batch_context = train_batch[2] if len(train_batch) == 3 else None
-
-                # generate partition P
-                z_dim = train_batch[0][0].shape[-1]
-                P = torch.randperm(z_dim)
-
-                # print("P permutation: ", P)
-                # Compute the PF objective
-                train_loss = self.PF_objective_brute_force(train_batch[0], P = P, context = batch_context)
-                
+                train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
                 train_loss.backward()
                 optimizer.step()
 

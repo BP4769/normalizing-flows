@@ -1,2 +1,4 @@
 **/__pycache__/
 *.egg-info/
+test/shapes.py
+.DS_Store
