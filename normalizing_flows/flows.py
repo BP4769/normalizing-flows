@@ -372,11 +372,12 @@ class PrincipalManifoldFlow(Flow):
     This class represents a normalizing flow that learns the principal manifold of the input data.
     """
 
-    def __init__(self, bijection: Bijection, **kwargs):
+    def __init__(self, bijection: Bijection, debug=False, **kwargs):
         """
         :param bijection: transformation component of the normalizing flow.
         :param manifold_dim: dimensionality of the principal manifold.
         """
+        self.debug = debug
         super().__init__(bijection)
 
 
@@ -447,12 +448,22 @@ class PrincipalManifoldFlow(Flow):
             context = context.to(self.loc)
         z, log_det = self.bijection.forward(x.to(self.loc), context=context)
         log_pz = self.base_log_prob(z)
-        log_px = log_pz + log_det
+        log_px = log_pz + 0.5*log_det
+
+        if self.debug:
+            print("z shape: ", z.shape)
+            print("log_det shape: ", log_det.shape)
+            print("log_pz shape: ", log_pz.shape)
+            print("log_px shape: ", log_px.shape)
 
         
         # Sample an index in the partition
         # print("z shape: ", z.shape)
         z_dim = z.shape[-1]
+
+        if self.debug:
+            print("z_dim: ", z_dim)
+
         if random_seed is None:
             k = torch.randint(0, z_dim, (1,)).item()
         else:
@@ -461,19 +472,30 @@ class PrincipalManifoldFlow(Flow):
         k_onehot[k] = 1.0
         k_mask = k_onehot.repeat(z.shape[0], 1)
 
-        # print("k: ", k)
-        # print("k_onehot: ", k_onehot)
-        # print("k_mask: ", k_mask)
+        if self.debug:
+            print("k: ", k)
+            print("k_onehot: ", k_onehot)
+            print("k_mask shape: ", k_mask.shape)
 
         # Compute an unbiased estimate of Ihat_P
         z.requires_grad_(True)
         Gk = torch.autograd.functional.vjp(lambda z: self.bijection.forward(z.to(self.loc), context=context)[0], z, v=k_mask)[1]
-        GkGkT = torch.sum(Gk**2)
-        Ihat_P = -log_det + z_dim * 0.5 * torch.log(GkGkT)
+        GkGkT = torch.sum(Gk**2, dim=1)
+        Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT)
 
-        # print("Gk shape: ", Gk.shape)
+        if self.debug:
+            print("Gk shape: ", Gk.shape)
+            print("GkGkT shape: ", GkGkT.shape)
+            print("GkGkT: ", GkGkT)
+            print("Ihat_P shape: ", Ihat_P.shape)
 
         objective = -log_px + alpha * Ihat_P
+
+        if self.debug:
+            print("objective shape: ", objective.shape)
+            print("objective: ", objective)
+            print("reduction: ", reduction(objective))
+
         return reduction(objective)
 
 
@@ -577,7 +599,7 @@ class PrincipalManifoldFlow(Flow):
         for epoch in iterator:
             for train_batch in train_loader:
                 optimizer.zero_grad()
-                train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
+                train_loss = compute_batch_loss(train_batch, reduction=torch.sum)
                 train_loss.backward()
                 optimizer.step()
 
