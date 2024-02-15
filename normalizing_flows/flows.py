@@ -599,7 +599,7 @@ class PrincipalManifoldFlow(Flow):
         for epoch in iterator:
             for train_batch in train_loader:
                 optimizer.zero_grad()
-                train_loss = compute_batch_loss(train_batch, reduction=torch.sum)
+                train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
                 train_loss.backward()
                 optimizer.step()
 
