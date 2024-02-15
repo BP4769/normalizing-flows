@@ -19,7 +19,7 @@ class Flow(nn.Module):
     A normalizing flow is itself a distribution which we can sample from or use it to compute the density of inputs.
     """
 
-    def __init__(self, bijection: Bijection):
+    def __init__(self, bijection: Bijection, record_Ihat_P=False, record_log_px=False, **kwargs):
         """
 
         :param bijection: transformation component of the normalizing flow.
@@ -28,6 +28,12 @@ class Flow(nn.Module):
         self.register_module('bijection', bijection)
         self.register_buffer('loc', torch.zeros(self.bijection.n_dim))
         self.register_buffer('covariance_matrix', torch.eye(self.bijection.n_dim))
+
+        # additional parameters for debugging and result visualization
+        self.record_Ihat_P = record_Ihat_P
+        self.Ihat_P = []
+        self.record_log_px = record_log_px
+        self.log_px = []
 
     @property
     def base(self) -> torch.distributions.Distribution:
@@ -114,6 +120,50 @@ class Flow(nn.Module):
             log_prob = self.base_log_prob(z) + log_det
             return x, log_prob
         return x
+    
+    def calculate_Ihat_P(self, x: torch.Tensor, alpha: float = 5.0, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
+        """ calculate Ihat_P for the Flow class so we can compare it with the Principal Manifold objective
+        """
+
+        # Evaluate log p(x) with the set prior
+        if context is not None:
+            assert context.shape[0] == x.shape[0]
+            context = context.to(self.loc)
+        z, log_det = self.bijection.forward(x.to(self.loc), context=context)
+        log_pz = self.base_log_prob(z)
+        log_px = log_pz + log_det
+        
+        # Sample an index in the partition
+        z_dim = z.shape[-1]
+
+        if random_seed is None:
+            k = torch.randint(0, z_dim, (1,)).item()
+        else:
+            k = torch.randint(0, z_dim, (1,), generator=torch.Generator().manual_seed(random_seed)).item()
+        k_onehot = torch.zeros(z_dim)
+        k_onehot[k] = 1.0
+        k_mask = k_onehot.repeat(z.shape[0], 1)
+
+        # Compute an unbiased estimate of Ihat_P
+        z.requires_grad_(True)
+        Gk = torch.autograd.functional.vjp(lambda z: self.bijection.forward(z.to(self.loc), context=context)[0], z, v=k_mask)[1]
+        GkGkT = torch.sum(Gk**2, dim=1)
+        Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT)
+
+        return Ihat_P, log_px
+
+    def get_Ihat_P(self, as_tensor=True):
+        # transform list to tensor
+        if as_tensor:
+            return torch.stack(self.Ihat_P)
+        return self.Ihat_P
+    
+    def get_log_px(self, as_tensor=True):
+        # transform list to tensor
+        if as_tensor:
+            return torch.stack(self.log_px)
+        return self.log_px
+
 
     def fit(self,
             x_train: torch.Tensor,
@@ -197,6 +247,10 @@ class Flow(nn.Module):
             assert batch_log_prob.shape == batch_weights.shape, f"{batch_log_prob.shape = }, {batch_weights.shape = }"
             batch_loss = -reduction(batch_log_prob * batch_weights) / n_event_dims
 
+            if self.record_Ihat_P or self.record_log_px:
+                Ihat_p, log_px = self.calculate_Ihat_P(batch_x, alpha=5.0, reduction=torch.mean, random_seed=None, context=batch_context)
+                return batch_loss, Ihat_p, log_px
+
             return batch_loss
 
         iterator = tqdm(range(n_epochs), desc='Fitting NF', disable=not show_progress)
@@ -204,9 +258,19 @@ class Flow(nn.Module):
         val_loss = None
 
         for epoch in iterator:
+            # create empty tensors to store Ihat_P and log_px
+            Ihat_P_epoch = torch.empty(0)
+            log_px_epoch = torch.empty(0)
+
             for train_batch in train_loader:
                 optimizer.zero_grad()
-                train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
+                if self.record_Ihat_P or self.record_log_px:
+                    train_loss, Ihat_p, log_px = compute_batch_loss(train_batch, reduction=torch.mean)
+                    Ihat_P_epoch = torch.cat((Ihat_P_epoch, Ihat_p))
+                    log_px_epoch = torch.cat((log_px_epoch, log_px))
+                else:
+                    train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
+
                 if hasattr(self.bijection, 'regularization'):
                     train_loss += self.bijection.regularization()
                 train_loss.backward()
@@ -220,6 +284,14 @@ class Flow(nn.Module):
                             f'Training loss (batch): {train_loss:.4f}, '
                             f'Validation loss: {val_loss:.4f}'
                         )
+
+            if self.record_Ihat_P:
+                with torch.no_grad():
+                    self.Ihat_P.append(Ihat_P_epoch.mean())
+            if self.record_log_px:
+                with torch.no_grad():
+                    self.log_px.append(log_px_epoch.mean())
+                
 
             # Compute validation loss at the end of each epoch
             # Validation loss will be displayed at the start of the next epoch
@@ -372,13 +444,21 @@ class PrincipalManifoldFlow(Flow):
     This class represents a normalizing flow that learns the principal manifold of the input data.
     """
 
-    def __init__(self, bijection: Bijection, debug=False, **kwargs):
+    def __init__(self, bijection: Bijection, debug=False, record_Ihat_P=False, record_log_px=False, **kwargs):
         """
         :param bijection: transformation component of the normalizing flow.
         :param manifold_dim: dimensionality of the principal manifold.
         """
+
+        # additional parameters for debugging and result visualization
         self.debug = debug
-        super().__init__(bijection)
+        # self.record_Ihat_P = record_Ihat_P
+        # self.Ihat_P = [] 
+        # self.record_log_px = record_log_px
+        # self.log_px = []
+
+        super().__init__(bijection, record_Ihat_P, record_log_px)
+
 
 
     def PF_objective_brute_force(self, x: torch.Tensor, P, alpha: float = 5.0, context: torch.Tensor = None): 
@@ -428,7 +508,6 @@ class PrincipalManifoldFlow(Flow):
         return objective.mean()
 
     
-
 
     def PF_objective_unbiased(self, x: torch.Tensor, alpha: float = 5.0, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
         """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
@@ -496,7 +575,22 @@ class PrincipalManifoldFlow(Flow):
             print("objective: ", objective)
             print("reduction: ", reduction(objective))
 
+        if self.record_Ihat_P or self.record_log_px:
+            return reduction(objective), Ihat_P, log_px
+
         return reduction(objective)
+    
+    def get_Ihat_P(self, as_tensor=True):
+        # transform list to tensor
+        if as_tensor:
+            return torch.stack(self.Ihat_P)
+        return self.Ihat_P
+    
+    def get_log_px(self, as_tensor=True):
+        # transform list to tensor
+        if as_tensor:
+            return torch.stack(self.log_px)
+        return self.log_px
 
 
     def fit(self,
@@ -576,19 +670,24 @@ class PrincipalManifoldFlow(Flow):
             batch_x, batch_weights = batch_[:2]
             batch_context = batch_[2] if len(batch_) == 3 else None
 
-            # print("batch_x shape: ", batch_x.shape)
-            # print("batch_weights shape: ", batch_weights.shape)
-            # print("batch_context: ", batch_context)
+            if self.debug:
+                print("batch_x shape: ", batch_x.shape)
+                print("batch_weights shape: ", batch_weights.shape)
+                print("batch_context: ", batch_context)
 
-            # print("batch_x: ", batch_x)
-            # print("batch_weights: ", batch_weights)
+                print("batch_x: ", batch_x)
+                print("batch_weights: ", batch_weights)
 
             # generate partition P (for brute force implementation)
-            z_dim = train_batch[0][0].shape[-1]
-            P = torch.randperm(z_dim)
+            # z_dim = train_batch[0][0].shape[-1]
+            # P = torch.randperm(z_dim)
             # batch_objective = self.PF_objective_brute_force(batch_x, P, context = batch_context)
 
-            batch_objective = self.PF_objective_unbiased(batch_x, context = batch_context, reduction = reduction)
+            if self.record_Ihat_P or self.record_log_px:
+                batch_objective, Ihat_p, log_px = self.PF_objective_unbiased(batch_x, alpha=5.0, reduction=torch.mean, random_seed=None, context=batch_context)
+                return batch_objective, Ihat_p, log_px
+            else:
+                batch_objective = self.PF_objective_unbiased(batch_x, context = batch_context, reduction = reduction)
 
             return batch_objective
 
@@ -597,9 +696,17 @@ class PrincipalManifoldFlow(Flow):
         val_loss = None
 
         for epoch in iterator:
+            # create empty tensors to store Ihat_P and log_px
+            Ihat_P_epoch = torch.empty(0)
+            log_px_epoch = torch.empty(0)
             for train_batch in train_loader:
                 optimizer.zero_grad()
-                train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
+                if self.record_Ihat_P or self.record_log_px:
+                    train_loss, Ihat_p, log_px = compute_batch_loss(train_batch, reduction=torch.mean)
+                    Ihat_P_epoch = torch.cat((Ihat_P_epoch, Ihat_p))
+                    log_px_epoch = torch.cat((log_px_epoch, log_px))
+                else:
+                    train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
                 train_loss.backward()
                 optimizer.step()
 
@@ -611,6 +718,13 @@ class PrincipalManifoldFlow(Flow):
                             f'Training loss (batch): {train_loss:.4f}, '
                             f'Validation loss: {val_loss:.4f}'
                         )
+
+            if self.record_Ihat_P:
+                with torch.no_grad():
+                    self.Ihat_P.append(Ihat_P_epoch.mean())
+            if self.record_log_px:
+                with torch.no_grad():
+                    self.log_px.append(log_px_epoch.mean())
 
             # Compute validation loss at the end of each epoch
             # Validation loss will be displayed at the start of the next epoch
