@@ -428,7 +428,7 @@ def swirl(num_points, radius, noise_std, angle=0, seed=None):
     return x, y
 
 
-def line(num_points, std, length=1, seed=None):
+def hline(num_points, noise_std, length=1, seed=None):
     """
     Generate a centered horizontal line with Gaussian noise in the vertical direction, with adjustable length.
 
