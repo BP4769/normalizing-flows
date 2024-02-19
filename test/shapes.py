@@ -445,6 +445,6 @@ def hline(num_points, noise_std, length=1, seed=None):
     x = np.linspace(-length / 2, length / 2, num_points)
     
     # Generate y coordinates as Gaussian noise around 0
-    y = np.random.normal(0, std, num_points)
+    y = np.random.normal(0, noise_std, num_points)
     
     return x, y
