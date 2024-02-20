@@ -16,6 +16,18 @@ from normalizing_flows.bijections.finite.autoregressive.transformers.combination
 from normalizing_flows.bijections.base import invert
 
 
+class LogMixCDFCoupling(CouplingBijection):
+    def __init__(self,
+                 event_shape: torch.Size,
+                 context_shape: torch.Size = None,
+                 n_hidden_layers: int = 2, # TODO: change to 64
+                 **kwargs):
+        coupling_mask = HalfSplit(event_shape) # TODO: use HalfSplit or implement CheckboardSplit
+        transformer = LogMixCdf(...) # TODO: implement & use LogMixCDF
+        conditioner_transform = ResidualFeedForward(...)# TODO: use ResidualFeedForward 
+        super().__init__(transformer, coupling_mask, conditioner_transform)
+
+
 # TODO move elementwise bijections, coupling bijections, and masked autoregressive bijections into separate files.
 class ElementwiseAffine(ElementwiseBijection):
     def __init__(self, event_shape, **kwargs):

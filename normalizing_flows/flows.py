@@ -513,7 +513,7 @@ class PrincipalManifoldFlow(Flow):
         """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
 
         Inputs:
-            x       - Unbatched 1d input
+            x       - Unbatched 1d input [b, d]
             rng_key - Torch random generator
             alpha   -  Regularization hyperparameter
 
@@ -535,7 +535,6 @@ class PrincipalManifoldFlow(Flow):
             print("log_pz shape: ", log_pz.shape)
             print("log_px shape: ", log_px.shape)
 
-        
         # Sample an index in the partition
         # print("z shape: ", z.shape)
         z_dim = z.shape[-1]

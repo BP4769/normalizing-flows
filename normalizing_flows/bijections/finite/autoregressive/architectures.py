@@ -16,6 +16,21 @@ from normalizing_flows.bijections.finite.autoregressive.layers import (
 from normalizing_flows.bijections.base import BijectiveComposition
 from normalizing_flows.bijections.finite.linear import ReversePermutation
 
+class LogMixCDF(BijectiveComposition):
+    def __init__(self, event_shape, n_layers: int = 2, **kwargs):
+        if isinstance(event_shape, int):
+            event_shape = (event_shape,)
+        # bijections = [ElementwiseAffine(event_shape=event_shape)]   ## maybe change
+        bijections = []
+        for _ in range(n_layers):
+            bijections.extend([
+                ElementwiseAffine(event_shape=event_shape),                   ## TODO: implement ActNorm
+                AffineCoupling(event_shape=event_shape),                   ## maybe change (InvConv)
+                LogMixCDFCoupling(event_shape=event_shape),                ## TODO: implement LogMixCDFCoupling
+            ])
+        bijections.append(ElementwiseAffine(event_shape=event_shape))
+        super().__init__(event_shape, bijections, **kwargs)
+
 
 class NICE(BijectiveComposition):
     def __init__(self, event_shape, n_layers: int = 2, **kwargs):
