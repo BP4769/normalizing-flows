@@ -426,3 +426,25 @@ def swirl(num_points, radius, noise_std, angle=0, seed=None):
     y = np.vstack([y1, y2]).flatten()
 
     return x, y
+
+
+def hline(num_points, noise_std, length=1, seed=None):
+    """
+    Generate a centered horizontal line with Gaussian noise in the vertical direction, with adjustable length.
+
+    :param num_points: Number of points to generate (int)
+    :param length: Length of the line (float)
+    :param std: Standard deviation of the Gaussian noise (float)
+    :param seed: Random seed for reproducibility (int, optional)
+    :return: x and y numpy arrays representing the point cloud
+    """
+    if seed is not None:
+        np.random.seed(seed)
+        
+    # Generate x coordinates evenly spaced, centered at 0
+    x = np.linspace(-length / 2, length / 2, num_points)
+    
+    # Generate y coordinates as Gaussian noise around 0
+    y = np.random.normal(0, noise_std, num_points)
+    
+    return x, y

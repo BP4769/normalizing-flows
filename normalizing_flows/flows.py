@@ -121,7 +121,7 @@ class Flow(nn.Module):
             return x, log_prob
         return x
     
-    def calculate_Ihat_P(self, x: torch.Tensor, alpha: float = 5.0, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
+    def calculate_Ihat_P(self, x: torch.Tensor, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
         """ calculate Ihat_P for the Flow class so we can compare it with the Principal Manifold objective
         """
 
@@ -248,7 +248,7 @@ class Flow(nn.Module):
             batch_loss = -reduction(batch_log_prob * batch_weights) / n_event_dims
 
             if self.record_Ihat_P or self.record_log_px:
-                Ihat_p, log_px = self.calculate_Ihat_P(batch_x, alpha=5.0, reduction=torch.mean, random_seed=None, context=batch_context)
+                Ihat_p, log_px = self.calculate_Ihat_P(batch_x, reduction=torch.mean, random_seed=None, context=batch_context)
                 return batch_loss, Ihat_p, log_px
 
             return batch_loss
@@ -444,7 +444,7 @@ class PrincipalManifoldFlow(Flow):
     This class represents a normalizing flow that learns the principal manifold of the input data.
     """
 
-    def __init__(self, bijection: Bijection, debug=False, record_Ihat_P=False, record_log_px=False, **kwargs):
+    def __init__(self, bijection: Bijection, alpha=None, debug=False, record_Ihat_P=False, record_log_px=False, **kwargs):
         """
         :param bijection: transformation component of the normalizing flow.
         :param manifold_dim: dimensionality of the principal manifold.
@@ -456,12 +456,16 @@ class PrincipalManifoldFlow(Flow):
         # self.Ihat_P = [] 
         # self.record_log_px = record_log_px
         # self.log_px = []
+        if alpha is None:
+            self.alpha = 5.0
+        else:
+            self.alpha = alpha
 
         super().__init__(bijection, record_Ihat_P, record_log_px)
 
 
 
-    def PF_objective_brute_force(self, x: torch.Tensor, P, alpha: float = 5.0, context: torch.Tensor = None): 
+    def PF_objective_brute_force(self, x: torch.Tensor, P, context: torch.Tensor = None): 
         """ Brute force implementation of the PF objective for the Flow class.
 
         Inputs:
@@ -504,12 +508,12 @@ class PrincipalManifoldFlow(Flow):
             # print("slodet shape: ", torch.slogdet(GkGk_T)[1].shape)
             Ihat_P += 0.5 * torch.slogdet(GkGk_T)[1]
 
-        objective = -log_px + alpha * Ihat_P
+        objective = -log_px + self.alpha * Ihat_P
         return objective.mean()
 
     
 
-    def PF_objective_unbiased(self, x: torch.Tensor, alpha: float = 5.0, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
+    def PF_objective_unbiased(self, x: torch.Tensor, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
         """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
 
         Inputs:
@@ -567,7 +571,7 @@ class PrincipalManifoldFlow(Flow):
             print("GkGkT: ", GkGkT)
             print("Ihat_P shape: ", Ihat_P.shape)
 
-        objective = -log_px + alpha * Ihat_P
+        objective = -log_px + self.alpha * Ihat_P
 
         if self.debug:
             print("objective shape: ", objective.shape)
@@ -683,7 +687,7 @@ class PrincipalManifoldFlow(Flow):
             # batch_objective = self.PF_objective_brute_force(batch_x, P, context = batch_context)
 
             if self.record_Ihat_P or self.record_log_px:
-                batch_objective, Ihat_p, log_px = self.PF_objective_unbiased(batch_x, alpha=5.0, reduction=torch.mean, random_seed=None, context=batch_context)
+                batch_objective, Ihat_p, log_px = self.PF_objective_unbiased(batch_x, reduction=torch.mean, random_seed=None, context=batch_context)
                 return batch_objective, Ihat_p, log_px
             else:
                 batch_objective = self.PF_objective_unbiased(batch_x, context = batch_context, reduction = reduction)
