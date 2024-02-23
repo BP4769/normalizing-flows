@@ -607,7 +607,6 @@ class PrincipalManifoldFlow(Flow):
             GkGkT = torch.sum(Gk**2, dim=1)
 
 
-
         # Failed attempt at using einsum to compute GkGkT in a single step:
         # if self.method == "einsum_one_step":
         #     G = torch.autograd.functional.jacobian(self.bijection.forward, x)[0]
