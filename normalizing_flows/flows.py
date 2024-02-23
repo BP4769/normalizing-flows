@@ -444,7 +444,7 @@ class PrincipalManifoldFlow(Flow):
     This class represents a normalizing flow that learns the principal manifold of the input data.
     """
 
-    def __init__(self, bijection: Bijection, alpha=None, debug=False, record_Ihat_P=False, record_log_px=False, **kwargs):
+    def __init__(self, bijection: Bijection, alpha=None, debug=False, record_Ihat_P=False, record_log_px=False, method="default", **kwargs):
         """
         :param bijection: transformation component of the normalizing flow.
         :param manifold_dim: dimensionality of the principal manifold.
@@ -460,6 +460,7 @@ class PrincipalManifoldFlow(Flow):
             self.alpha = 5.0
         else:
             self.alpha = alpha
+        self.method = method
 
         super().__init__(bijection, record_Ihat_P, record_log_px)
 
@@ -517,9 +518,9 @@ class PrincipalManifoldFlow(Flow):
         """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
 
         Inputs:
-            x       - Unbatched 1d input [b, d]
+            x       - Unbatched 1d input (b, d) where b is the batch size and d is the dimensionality of the input
             rng_key - Torch random generator
-            alpha   -  Regularization hyperparameter
+            alpha   - Regularization hyperparameter
 
         Outputs:
             objective - PFs objective
@@ -542,34 +543,107 @@ class PrincipalManifoldFlow(Flow):
         # Sample an index in the partition
         # print("z shape: ", z.shape)
         z_dim = z.shape[-1]
+        batch_size = z.shape[0]
 
         if self.debug:
             print("z_dim: ", z_dim)
 
         if random_seed is None:
-            k = torch.randint(0, z_dim, (1,)).item()
+            k = torch.randint(0, z_dim, (batch_size,))
         else:
-            k = torch.randint(0, z_dim, (1,), generator=torch.Generator().manual_seed(random_seed)).item()
-        k_onehot = torch.zeros(z_dim)
-        k_onehot[k] = 1.0
-        k_mask = k_onehot.repeat(z.shape[0], 1)
+            k = torch.randint(0, z_dim, (batch_size,), generator=torch.Generator().manual_seed(random_seed))
+        k_onehot = torch.eye(z_dim, dtype=torch.int32)[k]
 
         if self.debug:
-            print("k: ", k)
+            print("k shape: ", k.shape)
+            print("k_onehot shape: ", k_onehot.shape)
             print("k_onehot: ", k_onehot)
-            print("k_mask shape: ", k_mask.shape)
 
         # Compute an unbiased estimate of Ihat_P
-        z.requires_grad_(True)
-        Gk = torch.autograd.functional.vjp(lambda z: self.bijection.forward(z.to(self.loc), context=context)[0], z, v=k_mask)[1]
-        GkGkT = torch.sum(Gk**2, dim=1)
+        # Gk = torch.autograd.functional.vjp(lambda z: self.bijection.forward(z.to(self.loc), context=context)[0], z, v=k_mask)[1]
+        # GkGkT = torch.sum(Gk**2, dim=1)
+            
+        
+            
+        GkGkT = torch.empty(batch_size)
+        test1GkGkT = torch.empty(batch_size)
+        test2GkGkT = torch.empty(batch_size)
+        vjpGkGkT = torch.empty(batch_size)
+
+        if self.method == "default":
+            for i in range(len(x)):
+                # Option 1: jacobi on whole function, then take [0] for z ([1] would be for log_det), and einsum to get correct shape
+                # jacobi = torch.autograd.functional.jacobian(self.bijection.forward, x[i].unsqueeze(0))[0]
+                # jacobi = torch.einsum("bibj->ij", jacobi)
+
+                # Option 2 (FASTER): use lambda function to get only jacobi for z
+                jacobi = torch.autograd.functional.jacobian(lambda x: self.bijection.forward(x.to(self.loc), context=context)[0], x[i].unsqueeze(0))
+                Gk_i = torch.matmul(jacobi, k_onehot[i].float())
+
+                GkGkT[i] = torch.sum(Gk_i**2)
+
+        if self.method == "einsum":
+            for i in range(len(x)):
+                jacobi = torch.autograd.functional.jacobian(lambda x: self.bijection.forward(x.to(self.loc), context=context)[0], x[i].unsqueeze(0))
+                testGk_i = torch.einsum('bibj,j->i', jacobi, k_onehot[i].float())
+                test1GkGkT[i] = torch.sum(testGk_i**2)
+
+        if self.method == "vjp":
+            for i in range(len(x)):
+                if i == 0:
+                    print("x_i shape: ", x[i].unsqueeze(0).shape)
+                    print("k_onehot[i] shape: ", k_onehot[i].unsqueeze(0).float().shape)
+                    print("context: ", context)
+
+                    print("x:_i: ", x[i])
+                    print("x:_i: ", x[i].unsqueeze(0))
+                    print("k_onehot[i]: ", k_onehot[i])
+                    print("k_onehot[i]: ", k_onehot[i].shape)
+                    print("k_onehot[i]: ", k_onehot[i].unsqueeze(0).float())
+                vjpGkGkT[i] = torch.autograd.functional.vjp(lambda x_i: self.bijection.forward(x_i.to(self.loc), context=context)[0], x[i].unsqueeze(0), v=k_onehot[i].unsqueeze(0).float())[1]
+
+        if self.method == "vectorized":
+            Gk = torch.vmap(lambda x_i: torch.autograd.functional.vjp(lambda x: self.bijection.forward(x.to(self.loc), context=context)[0], x_i.unsqueeze(0), v=k_onehot.unsqueeze(-1).float())[1])(x)
+            GkGkT = torch.sum(Gk**2, dim=1)
+
+
+
+        # Failed attempt at using einsum to compute GkGkT in a single step:
+        # if self.method == "einsum_one_step":
+        #     G = torch.autograd.functional.jacobian(self.bijection.forward, x)[0]
+        #     if self.debug:
+        #         print("G shape original: ", G.shape)
+
+        #     G = torch.einsum("bibj->bij", G)
+        #     if self.debug:
+        #         print("G shape: ", G.shape)
+        #         print("G: ", G)
+
+        #     k_onehot_expanded = k_onehot.unsqueeze(-1).float()
+        #     if self.debug:
+        #         print("k_onehot_expanded shape: ", k_onehot_expanded.shape)
+        #         # print("k_onehot_expanded: ", k_onehot_expanded)
+        #     test3GkGkT = torch.einsum('bij,bje,bjk,bke->b', G, k_onehot_expanded, G, k_onehot_expanded)
+
+
+        if self.debug:
+            # print equals
+            print("GkGkT: ", GkGkT)
+            print("test1GkGkT: ", test1GkGkT)
+            print("test2GkGkT: ", test2GkGkT)
+            # print("test3GkGkT: ", test3GkGkT)
+            print("brute vs test1: ", torch.equal(GkGkT, test1GkGkT))
+            print("brute vs test2: ", torch.equal(GkGkT, test2GkGkT))
+            # print("brute vs test3: ", torch.equal(GkGkT, test3GkGkT))
+
         Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT)
 
         if self.debug:
-            print("Gk shape: ", Gk.shape)
             print("GkGkT shape: ", GkGkT.shape)
             print("GkGkT: ", GkGkT)
             print("Ihat_P shape: ", Ihat_P.shape)
+            print("Ihat_P: ", Ihat_P)
+
 
         objective = -log_px + self.alpha * Ihat_P
 
