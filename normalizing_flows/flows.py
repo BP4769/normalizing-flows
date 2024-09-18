@@ -563,7 +563,6 @@ class PrincipalManifoldFlow(Flow):
         # Gk = torch.autograd.functional.vjp(lambda z: self.bijection.forward(z.to(self.loc), context=context)[0], z, v=k_mask)[1]
         # GkGkT = torch.sum(Gk**2, dim=1)
             
-        
             
         GkGkT = torch.empty(batch_size)
         test1GkGkT = torch.empty(batch_size)

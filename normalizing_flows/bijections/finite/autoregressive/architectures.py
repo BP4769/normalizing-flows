@@ -25,7 +25,6 @@ class LogMixCDF(BijectiveComposition):
         for _ in range(n_layers):
             bijections.extend([
                 ElementwiseAffine(event_shape=event_shape),                   ## TODO: implement ActNorm
-                AffineCoupling(event_shape=event_shape),                   ## maybe change (InvConv)
                 LogMixCDFCoupling(event_shape=event_shape),                ## TODO: implement LogMixCDFCoupling
             ])
         bijections.append(ElementwiseAffine(event_shape=event_shape))
