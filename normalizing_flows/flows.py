@@ -444,7 +444,7 @@ class PrincipalManifoldFlow(Flow):
     This class represents a normalizing flow that learns the principal manifold of the input data.
     """
 
-    def __init__(self, bijection: Bijection, alpha=None, debug=False, record_Ihat_P=False, record_log_px=False, method="default", **kwargs):
+    def __init__(self, bijection: Bijection, alpha=None, debug=False, record_Ihat_P=False, record_log_px=False, method="default", objective="brute_force", **kwargs):
         """
         :param bijection: transformation component of the normalizing flow.
         :param manifold_dim: dimensionality of the principal manifold.
@@ -453,7 +453,7 @@ class PrincipalManifoldFlow(Flow):
         # additional parameters for debugging and result visualization
         self.debug = debug
         # self.record_Ihat_P = record_Ihat_P
-        # self.Ihat_P = [] 
+        # self.Ihat_P = []
         # self.record_log_px = record_log_px
         # self.log_px = []
         if alpha is None:
@@ -461,6 +461,7 @@ class PrincipalManifoldFlow(Flow):
         else:
             self.alpha = alpha
         self.method = method
+        self.objective = objective
 
         super().__init__(bijection, record_Ihat_P, record_log_px)
 
@@ -500,21 +501,34 @@ class PrincipalManifoldFlow(Flow):
         Ihat_P = -log_det
         for k in P:
             # print("k: ", k)
-            Gk = G[:, k]
+            Gk = G[:, k[0]]
             Gk_T = torch.transpose(Gk, -2, -1)
             GkGk_T = torch.matmul(Gk, Gk_T)
             # print("GkGk_T shape: ", GkGk_T.shape)
             # print("Gk shape: ", Gk.shape)
             # print("Gk_T shape: ", Gk_T.shape)
-            # print("slodet shape: ", torch.slogdet(GkGk_T)[1].shape)
+            # print("GkGk_T: ", GkGk_T)
+            # print("slogdet shape: ", torch.slogdet(GkGk_T)[1].shape)
             Ihat_P += 0.5 * torch.slogdet(GkGk_T)[1]
 
+        # print("Ihat_P shape: ", Ihat_P.shape)
+        # print("Ihat_P: ", Ihat_P)
+        # print("log_px shape: ", log_px.shape)
+        # print("log_px: ", log_px)
+        # print("alpha: ", self.alpha)
         objective = -log_px + self.alpha * Ihat_P
+
+        # print("objective shape: ", objective.shape)
+        # print("objective: ", objective)
+
+        if self.record_Ihat_P or self.record_log_px:
+            return objective.mean(), Ihat_P, log_px
+
         return objective.mean()
 
     
 
-    def PF_objective_unbiased(self, x: torch.Tensor, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
+    def PF_objective_unbiased_old(self, x: torch.Tensor, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
         """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
 
         Inputs:
@@ -530,15 +544,15 @@ class PrincipalManifoldFlow(Flow):
         if context is not None:
             assert context.shape[0] == x.shape[0]
             context = context.to(self.loc)
-        z, log_det = self.bijection.forward(x.to(self.loc), context=context)
-        log_pz = self.base_log_prob(z)
-        log_px = log_pz + 0.5*log_det
 
-        if self.debug:
-            print("z shape: ", z.shape)
-            print("log_det shape: ", log_det.shape)
-            print("log_pz shape: ", log_pz.shape)
-            print("log_px shape: ", log_px.shape)
+        def apply_func(x):
+            z, log_det = self.bijection.forward(x.to(self.loc), context=context)
+            log_pz = self.base_log_prob(z)
+            return z, (z, log_det, log_pz)
+        
+        G, (z, log_det, log_pz) = torch.func.jacrev(apply_func, has_aux=True)(x)
+        # log_px = log_pz + 0.5*log_det # This was our version
+        log_px = log_pz + log_det # taken from author's code
 
         # Sample an index in the partition
         # print("z shape: ", z.shape)
@@ -606,54 +620,78 @@ class PrincipalManifoldFlow(Flow):
             GkGkT = torch.sum(Gk**2, dim=1)
 
 
-        # Failed attempt at using einsum to compute GkGkT in a single step:
-        # if self.method == "einsum_one_step":
-        #     G = torch.autograd.functional.jacobian(self.bijection.forward, x)[0]
-        #     if self.debug:
-        #         print("G shape original: ", G.shape)
-
-        #     G = torch.einsum("bibj->bij", G)
-        #     if self.debug:
-        #         print("G shape: ", G.shape)
-        #         print("G: ", G)
-
-        #     k_onehot_expanded = k_onehot.unsqueeze(-1).float()
-        #     if self.debug:
-        #         print("k_onehot_expanded shape: ", k_onehot_expanded.shape)
-        #         # print("k_onehot_expanded: ", k_onehot_expanded)
-        #     test3GkGkT = torch.einsum('bij,bje,bjk,bke->b', G, k_onehot_expanded, G, k_onehot_expanded)
-
-
-        if self.debug:
-            # print equals
-            print("GkGkT: ", GkGkT)
-            print("test1GkGkT: ", test1GkGkT)
-            print("test2GkGkT: ", test2GkGkT)
-            # print("test3GkGkT: ", test3GkGkT)
-            print("brute vs test1: ", torch.equal(GkGkT, test1GkGkT))
-            print("brute vs test2: ", torch.equal(GkGkT, test2GkGkT))
-            # print("brute vs test3: ", torch.equal(GkGkT, test3GkGkT))
-
-        Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT)
-
-        if self.debug:
-            print("GkGkT shape: ", GkGkT.shape)
-            print("GkGkT: ", GkGkT)
-            print("Ihat_P shape: ", Ihat_P.shape)
-            print("Ihat_P: ", Ihat_P)
-
+        # Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT) # This was our version
+        Ihat_P = -log_det + 0.5 * torch.log(torch.sum(G**2, axis=-1)).sum() # taken from author's code
 
         objective = -log_px + self.alpha * Ihat_P
 
-        if self.debug:
-            print("objective shape: ", objective.shape)
-            print("objective: ", objective)
-            print("reduction: ", reduction(objective))
 
         if self.record_Ihat_P or self.record_log_px:
             return reduction(objective), Ihat_P, log_px
 
         return reduction(objective)
+    
+    def PF_objective_unbiased(self, x: torch.Tensor, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
+        """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
+
+        Inputs:
+            x       - Unbatched 1d input (b, d) where b is the batch size and d is the dimensionality of the input
+            rng_key - Torch random generator
+            alpha   - Regularization hyperparameter
+
+        Outputs:
+            objective - PFs objective
+        """
+
+        # Evaluate log p(x) with the set prior
+        if context is not None:
+            assert context.shape[0] == x.shape[0]
+            context = context.to(self.loc)
+
+        def objective_unbathced(x):
+
+            def apply_func(x):
+                print("x shape: ", x.shape)
+                print("x: ", x)
+                z, log_det = self.bijection.forward(x.to(self.loc).unsqueeze(0), context=context)
+                log_pz = self.base_log_prob(z)
+                z = z.squeeze(0)
+                log_det = log_det.squeeze(0)
+                log_pz = log_pz.squeeze(0)
+                return z, (z, log_det, log_pz)
+            
+            G, (z, log_det, log_pz) = torch.func.jacrev(apply_func, has_aux=True)(x)
+            # log_px = log_pz + 0.5*log_det # This was our version
+            log_px = log_pz + log_det # taken from author's code
+            print("G: ", G)
+            print("G shape: ", G.shape)
+
+            [1000, 2, 1000, 2] # G[0,:,0,:]
+
+            [2, 2]
+
+            # Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT) # This was our version
+            Ihat_P = -log_det + 0.5 * torch.log(torch.sum(G**2, axis=-1)).sum() # taken from author's code
+
+            objective = -log_px + self.alpha * Ihat_P
+
+            return objective, Ihat_P, log_px
+        
+        objective, Ihat_P, log_px = torch.vmap(objective_unbathced)(x)
+        # objective, Ihat_P, log_px = objective_unbathced(x)
+        objective = reduction(objective)
+        # print all shapes:
+        print("x shape: ", x.shape)
+        print("objective shape: ", objective.shape)
+        print("Ihat_P shape: ", Ihat_P.shape)
+        print("log_px shape: ", log_px.shape)
+
+        print("objective: ", objective)
+        if self.record_Ihat_P or self.record_log_px:
+            return objective, Ihat_P, log_px
+        else:
+            return objective
+
     
     def get_Ihat_P(self, as_tensor=True):
         # transform list to tensor
@@ -753,16 +791,30 @@ class PrincipalManifoldFlow(Flow):
                 print("batch_x: ", batch_x)
                 print("batch_weights: ", batch_weights)
 
-            # generate partition P (for brute force implementation)
-            # z_dim = train_batch[0][0].shape[-1]
-            # P = torch.randperm(z_dim)
-            # batch_objective = self.PF_objective_brute_force(batch_x, P, context = batch_context)
 
-            if self.record_Ihat_P or self.record_log_px:
-                batch_objective, Ihat_p, log_px = self.PF_objective_unbiased(batch_x, reduction=torch.mean, random_seed=None, context=batch_context)
-                return batch_objective, Ihat_p, log_px
+            if self.objective == "brute_force":
+                # generate partition P (for brute force implementation)
+                z_dim = train_batch[0][0].shape[-1]
+                num_partitions = 5
+                generate_partition = lambda x, num_partitions: [p for p in torch.chunk(torch.arange(x), num_partitions)]
+                P = generate_partition(z_dim, num_partitions)
+                # print("P: ", P)
+                if self.record_Ihat_P or self.record_log_px: 
+                    batch_objective, Ihat_p, log_px = self.PF_objective_brute_force(batch_x, P, context = batch_context)
+                    return batch_objective, Ihat_p, log_px
+                else:
+                    batch_objective = self.PF_objective_brute_force(batch_x, P, context = batch_context)
+                    return batch_objective
+                
+            elif self.objective == "unbiased":
+                if self.record_Ihat_P or self.record_log_px:
+                    batch_objective, Ihat_p, log_px = self.PF_objective_unbiased(batch_x, reduction=torch.mean, random_seed=None, context=batch_context)
+                    return batch_objective, Ihat_p, log_px
+                else:
+                    batch_objective = self.PF_objective_unbiased(batch_x, context = batch_context, reduction = reduction)
+
             else:
-                batch_objective = self.PF_objective_unbiased(batch_x, context = batch_context, reduction = reduction)
+                raise ValueError("Invalid objective method")
 
             return batch_objective
 

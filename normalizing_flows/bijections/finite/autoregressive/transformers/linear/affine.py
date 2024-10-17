@@ -31,12 +31,49 @@ class Affine(ScalarTransformer):
         return torch.zeros(self.parameter_shape)
 
     def forward(self, x: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        print("h: ", h)
         u_alpha = h[..., 0]
         alpha = torch.exp(self.identity_unconstrained_alpha + u_alpha / self.const) + self.m
         log_alpha = torch.log(alpha)
 
         u_beta = h[..., 1]
         beta = u_beta
+
+
+        # [[ 0.0672, -0.2531],
+        # [ 1.0529, -0.0293],
+        # [ 0.4706, -0.0045],
+        # [ 0.0560,  0.0123],
+        # [-0.0120,  0.2785],
+        # [-0.0672, -0.7531],
+        # [-0.4706, -0.0045],
+        # [-1.0560,  0.0123],
+        # [ 0.0120,  0.7785],
+        # [-0.0529, -0.0293]]
+
+        # [[-0.0529, -0.0293]]
+
+        # [[ 0.0672, -0.2531]]
+
+        # [[[ 0.0672, -0.2531]],
+
+        # [[ 1.0529, -0.0293]],
+
+        # [[ 0.4706, -0.0045]],
+
+        # [[ 0.0560,  0.0123]],
+
+        # [[-0.0120,  0.2785]],
+
+        # [[-0.0672, -0.7531]],
+
+        # [[-0.4706, -0.0045]],
+
+        # [[-1.0560,  0.0123]],
+
+        # [[ 0.0120,  0.7785]],
+
+        # [[-0.0529, -0.0293]]]
 
         log_det = sum_except_batch(log_alpha, self.event_shape)
         return alpha * x + beta, log_det
