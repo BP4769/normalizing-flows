@@ -621,7 +621,7 @@ class PrincipalManifoldFlow(Flow):
 
 
         # Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT) # This was our version
-        Ihat_P = -log_det + 0.5 * torch.log(torch.sum(G**2, axis=-1)).sum() # taken from author's code
+        Ihat_P = -log_det + 0.5 * torch.log(torch.sum(G ** 2, dim=-1)).sum()  # taken from author's code
 
         objective = -log_px + self.alpha * Ihat_P
 
@@ -630,67 +630,50 @@ class PrincipalManifoldFlow(Flow):
             return reduction(objective), Ihat_P, log_px
 
         return reduction(objective)
-    
-    def PF_objective_unbiased(self, x: torch.Tensor, reduction: callable = torch.mean, random_seed: int = None, context: torch.Tensor = None):
-        """ Unbiased estimate of the PF objective when the partition size is 1 for the Flow class.
 
-        Inputs:
-            x       - Unbatched 1d input (b, d) where b is the batch size and d is the dimensionality of the input
-            rng_key - Torch random generator
-            alpha   - Regularization hyperparameter
-
-        Outputs:
-            objective - PFs objective
-        """
-
-        # Evaluate log p(x) with the set prior
+    def PF_objective_unbiased(self,
+                              x: torch.Tensor,
+                              reduction: callable = torch.mean,
+                              random_seed: int = None,
+                              context: torch.Tensor = None):
         if context is not None:
             assert context.shape[0] == x.shape[0]
             context = context.to(self.loc)
 
-        def objective_unbathced(x):
+        x = x.clone().to(self.loc)
+        x.requires_grad_(True)
+        z, log_det = self.bijection.forward(x, context=context)
+        log_prob = self.log_prob(z)
 
-            def apply_func(x):
-                print("x shape: ", x.shape)
-                print("x: ", x)
-                z, log_det = self.bijection.forward(x.to(self.loc).unsqueeze(0), context=context)
-                log_pz = self.base_log_prob(z)
-                z = z.squeeze(0)
-                log_det = log_det.squeeze(0)
-                log_pz = log_pz.squeeze(0)
-                return z, (z, log_det, log_pz)
-            
-            G, (z, log_det, log_pz) = torch.func.jacrev(apply_func, has_aux=True)(x)
-            # log_px = log_pz + 0.5*log_det # This was our version
-            log_px = log_pz + log_det # taken from author's code
-            print("G: ", G)
-            print("G shape: ", G.shape)
+        def _jacobian(_y, _x):
+            # Compute jacobian of f(_x) = _y
+            # _x.shape == _y.shape == (d,)
+            return torch.stack([
+                torch.autograd.grad(
+                    out_dim,
+                    _x,
+                    retain_graph=True,
+                    allow_unused=True,
+                    materialize_grads=True
+                )[0] for out_dim in _y
+            ])
 
-            [1000, 2, 1000, 2] # G[0,:,0,:]
+        def batch_jacobian(outputs, inputs):
+            # outputs.shape == inputs.shape == (n, d)
+            return torch.stack([_jacobian(_y, _x) for (_y, _x) in zip(outputs, inputs)])  # shape == (n, d, d)
 
-            [2, 2]
+        jacobian = batch_jacobian(z, x)
 
-            # Ihat_P = -0.5*log_det + z_dim * 0.5 * torch.log(GkGkT) # This was our version
-            Ihat_P = -log_det + 0.5 * torch.log(torch.sum(G**2, axis=-1)).sum() # taken from author's code
+        n_data, n_dim = x.shape
+        assert jacobian.shape == (n_data, n_dim, n_dim)
 
-            objective = -log_px + self.alpha * Ihat_P
+        Ihat_P = -log_det + 0.5 * torch.log(torch.sum(jacobian ** 2, dim=0)).sum()
+        loss_value = reduction(-log_prob + self.alpha * Ihat_P)
 
-            return objective, Ihat_P, log_px
-        
-        objective, Ihat_P, log_px = torch.vmap(objective_unbathced)(x)
-        # objective, Ihat_P, log_px = objective_unbathced(x)
-        objective = reduction(objective)
-        # print all shapes:
-        print("x shape: ", x.shape)
-        print("objective shape: ", objective.shape)
-        print("Ihat_P shape: ", Ihat_P.shape)
-        print("log_px shape: ", log_px.shape)
-
-        print("objective: ", objective)
         if self.record_Ihat_P or self.record_log_px:
-            return objective, Ihat_P, log_px
+            return loss_value, Ihat_P, log_prob
         else:
-            return objective
+            return loss_value
 
     
     def get_Ihat_P(self, as_tensor=True):

@@ -99,12 +99,12 @@ class BijectiveComposition(Bijection):
 
     def forward(self, x: torch.Tensor, context: torch.Tensor = None, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         log_det = torch.zeros(size=get_batch_shape(x, event_shape=self.event_shape), device=x.device)
-        print("x.shape (inside bijective composition): ", x)
+        # print("x.shape (inside bijective composition): ", x)
         for layer in self.layers:
-            print(layer)
+            # print(layer)
             x, log_det_layer = layer(x, context=context)
-            print("log_det_layer.shape: ", log_det_layer)
-            print("log_det.shape: ", log_det)
+            # print("log_det_layer.shape: ", log_det_layer)
+            # print("log_det.shape: ", log_det)
             log_det += log_det_layer
         z = x
         return z, log_det

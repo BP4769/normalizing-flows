@@ -31,7 +31,7 @@ class Affine(ScalarTransformer):
         return torch.zeros(self.parameter_shape)
 
     def forward(self, x: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        print("h: ", h)
+        # print("h: ", h)
         u_alpha = h[..., 0]
         alpha = torch.exp(self.identity_unconstrained_alpha + u_alpha / self.const) + self.m
         log_alpha = torch.log(alpha)
