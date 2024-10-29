@@ -467,7 +467,7 @@ class PrincipalManifoldFlow(Flow):
 
 
 
-    def PF_objective_brute_force(self, x: torch.Tensor, P, context: torch.Tensor = None): 
+    def PF_objective_brute_force_old(self, x: torch.Tensor, P, context: torch.Tensor = None): 
         """ Brute force implementation of the PF objective for the Flow class.
 
         Inputs:
@@ -630,6 +630,55 @@ class PrincipalManifoldFlow(Flow):
             return reduction(objective), Ihat_P, log_px
 
         return reduction(objective)
+    
+    def PF_objective_brute_force(self, 
+                                 x: torch.Tensor,
+                                 reduction: callable = torch.mean, 
+                                 random_seed: int = None, 
+                                 context: torch.Tensor = None):
+        if context is not None:
+            assert context.shape[0] == x.shape[0]
+            context = context.to(self.loc)
+
+        x = x.clone().to(self.loc)
+        x.requires_grad_(True)
+
+        def _loss(_x):
+            # _x = _x.clone().to(self.loc)
+            # _x.requires_grad_(True)
+            _z, _log_det = self.bijection.forward(_x.unsqueeze(0))
+            _z = _z.squeeze(0)
+            _log_det = _log_det.squeeze(0)
+
+            jacobian = torch.stack([
+                        torch.autograd.grad(
+                            out_dim,
+                            _x,
+                            retain_graph=True,
+                            allow_unused=True,
+                            materialize_grads=True
+                        )[0] for out_dim in _z
+                    ])
+            
+            _Ihat_P = -_log_det + 0.5 * torch.log(torch.sum(jacobian ** 2, dim=0)).sum()
+            _log_px = self.log_prob(_z.unsqueeze(0))
+
+            objective = -_log_px + self.alpha * _Ihat_P
+            
+            return _Ihat_P, _log_px, objective
+
+        results = [_loss(_x) for _x in x]
+        Ihat_P, log_px, objectives = zip(*results)
+
+        Ihat_P = torch.stack(Ihat_P)
+        log_px = torch.stack(log_px)
+        objective = torch.stack(objectives)
+
+        if self.record_Ihat_P or self.record_log_px:
+            return reduction(objective), Ihat_P, log_px
+        else:
+            return reduction(objective)
+        
 
     def PF_objective_unbiased(self,
                               x: torch.Tensor,
@@ -648,6 +697,7 @@ class PrincipalManifoldFlow(Flow):
         def _jacobian(_y, _x):
             # Compute jacobian of f(_x) = _y
             # _x.shape == _y.shape == (d,)
+
             return torch.stack([
                 torch.autograd.grad(
                     out_dim,
@@ -666,6 +716,12 @@ class PrincipalManifoldFlow(Flow):
 
         n_data, n_dim = x.shape
         assert jacobian.shape == (n_data, n_dim, n_dim)
+
+        print("jacobian", jacobian)
+        print("torch.sum(jacobian ** 2, dim=0)", torch.sum(jacobian ** 2, dim=0))
+        print("torch.log(torch.sum(jacobian ** 2, dim=0))", torch.log(torch.sum(jacobian ** 2, dim=0)))
+        print("log_det", log_det)
+        print("log_prob", log_prob)
 
         Ihat_P = -log_det + 0.5 * torch.log(torch.sum(jacobian ** 2, dim=0)).sum()
         loss_value = reduction(-log_prob + self.alpha * Ihat_P)
@@ -777,16 +833,18 @@ class PrincipalManifoldFlow(Flow):
 
             if self.objective == "brute_force":
                 # generate partition P (for brute force implementation)
-                z_dim = train_batch[0][0].shape[-1]
-                num_partitions = 5
-                generate_partition = lambda x, num_partitions: [p for p in torch.chunk(torch.arange(x), num_partitions)]
-                P = generate_partition(z_dim, num_partitions)
+                # z_dim = train_batch[0][0].shape[-1]
+                # num_partitions = 5
+                # generate_partition = lambda x, num_partitions: [p for p in torch.chunk(torch.arange(x), num_partitions)]
+                # P = generate_partition(z_dim, num_partitions)
                 # print("P: ", P)
                 if self.record_Ihat_P or self.record_log_px: 
-                    batch_objective, Ihat_p, log_px = self.PF_objective_brute_force(batch_x, P, context = batch_context)
+                    # batch_objective, Ihat_p, log_px = self.PF_objective_brute_force_old(batch_x, P, context = batch_context)
+                    batch_objective, Ihat_p, log_px = self.PF_objective_brute_force(batch_x, reduction=reduction, random_seed=None, context=batch_context)
                     return batch_objective, Ihat_p, log_px
                 else:
-                    batch_objective = self.PF_objective_brute_force(batch_x, P, context = batch_context)
+                    # batch_objective = self.PF_objective_brute_force_old(batch_x, P, context = batch_context)
+                    batch_objective = self.PF_objective_brute_force(batch_x, context = batch_context, reduction = reduction)
                     return batch_objective
                 
             elif self.objective == "unbiased":
@@ -800,8 +858,10 @@ class PrincipalManifoldFlow(Flow):
                 raise ValueError("Invalid objective method")
 
             return batch_objective
+        
 
         iterator = tqdm(range(n_epochs), desc='Fitting Principal Manifold Flow', disable=not show_progress)
+
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
         val_loss = None
 
@@ -815,6 +875,8 @@ class PrincipalManifoldFlow(Flow):
                     train_loss, Ihat_p, log_px = compute_batch_loss(train_batch, reduction=torch.mean)
                     Ihat_P_epoch = torch.cat((Ihat_P_epoch, Ihat_p))
                     log_px_epoch = torch.cat((log_px_epoch, log_px))
+                    # update tqdm description
+                    iterator.set_description(f'Fitting Principal Manifold Flow ({Ihat_p.mean():.6f}, {log_px.mean():.6f})')
                 else:
                     train_loss = compute_batch_loss(train_batch, reduction=torch.mean)
                 train_loss.backward()
